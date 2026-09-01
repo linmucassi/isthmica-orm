@@ -56,6 +56,45 @@ because the migrations engine will need them, not because anything reads
 them currently. Don't rely on them for application logic; they're there for
 Isthmica's own future tooling.
 
+### A naming detail: object key vs. declared column name
+
+Read this before naming a column differently from its DB column, e.g.
+`tenantId: text("tenant_id")`:
+
+**The string passed to `text()`/`serial()`/`timestamp()` — the intended real
+DB column name — is currently metadata only.** It's stored on
+`ColumnBuilder.name` (see above), but nothing uses it to determine what
+identifier Kysely's typed queries actually reference. That's the **object
+key** you used in the `columns` record (`tenantId` in the example above),
+because that's the key `InferRawTable`/`InferDatabase` carries through into
+the `Database` type Kysely compiles queries against.
+
+Concretely: `table("orders", { tenantId: text("tenant_id") })` produces a
+Kysely `Database` type where the column is keyed `tenantId`, and
+`db.selectFrom("orders").where("tenantId", "=", x)` compiles to
+`where "tenantId" = $1` — **not** `where "tenant_id" = $1`. If your real
+Postgres table has a column literally named `tenant_id`, that query
+references a column that doesn't exist.
+
+Two ways to actually get this right today:
+
+1. **Make the object key match the real DB column name exactly** — e.g.
+   `tenant_id: text("tenant_id")`, and reference it the same way everywhere
+   (`.where("tenant_id", ...)`, `row.tenant_id`). Not idiomatic camelCase JS,
+   but correct with zero extra setup.
+2. **Install Kysely's own `CamelCasePlugin`** (`import { CamelCasePlugin } from "kysely"`,
+   added to the `Kysely` constructor's `plugins` array) if you want camelCase
+   JS keys over snake_case DB columns — it transforms outgoing identifiers
+   and incoming result keys transparently. This is a real, official Kysely
+   plugin, not something Isthmica wires in for you.
+
+`@isthmica/core` doesn't currently do either of these automatically, and the
+`name` argument existing without being load-bearing is genuinely easy to
+misread as "this is the real column name, use whatever object key you like"
+— it was misread exactly that way while writing this project's own docs and
+tests before this note existed. See
+[`known-risks.md`](./known-risks.md#discovered-while-building-db-ops).
+
 ## `table()`
 
 ```ts
@@ -136,11 +175,22 @@ Two things worth knowing about how it resolves:
    in the `tables` object. `{ myOrders: orders }` still produces `DB["orders"]`
    if `orders` was declared as `table("orders", ...)`.
 2. Each column is wrapped in Kysely's own `ColumnType<Select, Insert, Insert>`
-   — the same mechanism Kysely uses internally to let `Selectable<T>` /
-   `Insertable<T>` / `Updateable<T>` derive different shapes for reads,
-   inserts, and updates. Update currently reuses the insert type rather than
-   having its own third type parameter threaded through — a deliberate MVP
-   simplification, not a Kysely limitation.
+   — Update currently reuses the Insert type rather than having its own
+   third type parameter threaded through (a deliberate MVP simplification,
+   not a Kysely limitation) — and `InferSelect`/`InferInsert`/`InferUpdate`
+   (used for `$inferSelect`/`$inferInsert` and by `@isthmica/db-ops`'s
+   `createRepository`) are Kysely's own `Selectable<T>`/`Insertable<T>`/
+   `Updateable<T>` applied to that wrapped shape — not hand-rolled. An
+   earlier version mapped every column straight through instead
+   (`{ [K in keyof TColumns]: TColumns[K]["$insertType"] }`), which looked
+   equivalent but wasn't: it made a DB-generated column's insert key
+   *required-but-possibly-undefined* rather than *optional*, so
+   `insert({ label: "x" })` failed to typecheck for a table with an
+   auto-generated `id` — defeating the entire point of `.primaryKey()`
+   making insert optional. Caught while building `@isthmica/db-ops`'s
+   repository layer (see [`known-risks.md`](./known-risks.md#discovered-while-building-db-ops)),
+   fixed by reusing Kysely's utilities instead of re-deriving the same
+   logic worse.
 
 ## What's not here yet
 

@@ -64,6 +64,19 @@ is planned to do the same. The UX for that confirmation flow (how many
 prompts is too many vs. how much silent-wrong-guessing is acceptable) hasn't
 been designed. Migrations (Phase 1) haven't started at all.
 
+### Prisma backend (`@isthmica/db-ops`) not integration-tested
+
+`prisma.connect()` in `@isthmica/db-ops` is implemented against
+`prisma-extension-kysely`'s documented v4 API (verified against the
+package's own README) and Prisma 7's driver-adapter requirement, but has
+never been run against a live Prisma client — this repo has no generated
+Prisma client to test against, and the packages involved
+(`@prisma/client`, `@prisma/adapter-pg`, `prisma-extension-kysely`) are
+optional peer dependencies not installed here. See
+[`db-ops.md`](./db-ops.md#prisma-backend). Treat it as
+implemented-per-documentation, not verified-working, until someone runs it
+against a real Postgres + Prisma 7 setup.
+
 ### Package/domain naming
 
 `isthmica`, `isthmica-orm`, `isthmicadb`, and `@isthmica/core` were

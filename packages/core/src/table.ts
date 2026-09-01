@@ -1,4 +1,4 @@
-import type { ColumnType } from "kysely";
+import type { ColumnType, Insertable, Selectable, Updateable } from "kysely";
 import type { ColumnBuilder } from "./column.js";
 
 export interface TableOptions {
@@ -20,14 +20,6 @@ export interface TableDefinition<
   readonly $inferInsert: InferInsert<TColumns>;
 }
 
-export type InferSelect<TColumns extends AnyColumns> = {
-  [K in keyof TColumns]: TColumns[K]["$selectType"];
-};
-
-export type InferInsert<TColumns extends AnyColumns> = {
-  [K in keyof TColumns]: TColumns[K]["$insertType"];
-};
-
 /** The raw per-table shape Kysely's `Database` interface expects. */
 export type InferRawTable<TColumns extends AnyColumns> = {
   [K in keyof TColumns]: ColumnType<
@@ -36,6 +28,20 @@ export type InferRawTable<TColumns extends AnyColumns> = {
     TColumns[K]["$insertType"]
   >;
 };
+
+// Built on Kysely's own `Selectable`/`Insertable`/`Updateable` rather than
+// hand-rolled mapped types. A first version mapped every column straight
+// through (`{ [K in keyof TColumns]: TColumns[K]["$insertType"] }`), which
+// looked right but wasn't: a column typed `number | undefined` that way is
+// still a *required* key whose value may be `undefined`, not an *optional*
+// key — so `repo.insert({ label: "x" })` for a table with an
+// auto-generated `id` failed to typecheck, defeating the entire point of
+// `.primaryKey()`/`.defaultNow()` making insert optional. Kysely's own
+// utilities already do the required/optional split correctly (that's
+// exactly what they're for) — reuse them instead of re-solving it worse.
+export type InferSelect<TColumns extends AnyColumns> = Selectable<InferRawTable<TColumns>>;
+export type InferInsert<TColumns extends AnyColumns> = Insertable<InferRawTable<TColumns>>;
+export type InferUpdate<TColumns extends AnyColumns> = Updateable<InferRawTable<TColumns>>;
 
 export function table<TName extends string, TColumns extends AnyColumns>(
   name: TName,

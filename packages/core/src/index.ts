@@ -6,6 +6,7 @@ export {
   type TableOptions,
   type InferSelect,
   type InferInsert,
+  type InferUpdate,
   type InferRawTable,
   type InferDatabase,
 } from "./table.js";

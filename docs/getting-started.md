@@ -45,6 +45,15 @@ option implemented today. `audit` and `partitionBy` are part of the planned
 DSL surface (see [`roadmap.md`](./roadmap.md)) but do nothing yet if you set
 them; there's no code that reads them.
 
+**Before you point this at a real database:** `tenantId: text("tenant_id")`
+above only works end-to-end if your actual Postgres column is named
+`tenantId`, not `tenant_id` — the string passed to `text()` isn't wired to
+query generation yet. Read
+[`schema-dsl.md`'s naming note](./schema-dsl.md#a-naming-detail-object-key-vs-declared-column-name)
+before choosing real column names; it explains both correct options (match
+the object key to the DB column exactly, or install Kysely's own
+`CamelCasePlugin`).
+
 ## 3. Build the Kysely `Database` type from your schema
 
 ```ts
