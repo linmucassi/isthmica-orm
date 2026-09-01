@@ -1,6 +1,7 @@
 import { sql, type Kysely, type UpdateQueryBuilder, type UpdateResult } from "kysely";
+import { createAuditPlugin, type AuditEvent } from "./plugins/audit.js";
 import { createSoftDeletePlugin } from "./plugins/soft-delete.js";
-import { softDeleteTableNames, type TableDefinition } from "./table.js";
+import { auditTableNames, softDeleteTableNames, type TableDefinition } from "./table.js";
 
 /**
  * Installs the soft-delete plugin (auto `deleted_at IS NULL` scoping on
@@ -16,6 +17,25 @@ export function withSoftDelete<DB>(
     return db;
   }
   return db.withPlugin(createSoftDeletePlugin({ tables: names }));
+}
+
+/**
+ * Installs the audit plugin (post-image capture on INSERT/UPDATE/DELETE,
+ * see plugins/audit.ts for the pre-image boundary and dialect notes) for
+ * every table in `tables` that declares `audit: true`, handing captured
+ * events to `sink`. Returns the same Kysely instance unchanged if no table
+ * opts in.
+ */
+export function withAudit<DB>(
+  db: Kysely<DB>,
+  tables: Record<string, TableDefinition<any, any>>,
+  sink: (event: AuditEvent) => void | Promise<void>,
+): Kysely<DB> {
+  const names = auditTableNames(tables);
+  if (names.length === 0) {
+    return db;
+  }
+  return db.withPlugin(createAuditPlugin({ tables: names, sink }));
 }
 
 /**

@@ -39,6 +39,7 @@ Kysely. Add the ones you actually use:
 ```bash
 npm install pg                                              # for the pg backend
 npm install @prisma/client @prisma/adapter-pg prisma-extension-kysely  # for the prisma backend
+npm install mysql2                                          # for the mysql backend
 ```
 
 The Prisma-backed path additionally requires Prisma 7+ (its driver-adapters
@@ -114,6 +115,34 @@ loaded via dynamic `import()` inside `prisma.connect()` — requiring
 `@isthmica/db-ops` doesn't eagerly load any of them, so a project using only
 the `pg` backend never touches Prisma's toolchain at all.
 
+## MySQL backend
+
+```ts
+import { mysql } from "@isthmica/db-ops";
+
+const db = await mysql.connect<DB>({ host: "localhost", user: "root", database: "app" });
+```
+
+Mirrors the `pg` backend exactly — `mysql.pool(options)` for just the pool,
+`mysql.connect(options)` (or `mysql.connect({ pool: existingPool })`) for
+the full `Kysely` instance — via Kysely's own `MysqlDialect` paired with
+`mysql2`, the standard combination. `options` is `mysql2`'s own
+`PoolOptions` type, passed straight through, same "don't reinvent
+credential configuration" approach as `pg`.
+
+Both `mysql.pool` and `mysql.connect` are `async`, unlike `pg`'s — `mysql2`
+is loaded via dynamic `import()`, the same reasoning `prisma.ts` already
+uses: `mysql2` is a genuinely optional add-on, and a static import would
+force it to be installed just to import *anything* from
+`@isthmica/db-ops`, even code that never touches MySQL. (`pg` doesn't get
+this treatment, since it's the assumed default dialect throughout this
+project's docs — see [`known-risks.md`](./known-risks.md) for that
+asymmetry, tracked honestly rather than silently left inconsistent.)
+
+**Not verified against a live MySQL server** — only compile-only tested
+(no MySQL instance exists anywhere in this project). See
+[`known-risks.md`](./known-risks.md).
+
 ## `isthmica` default export
 
 ```ts
@@ -123,9 +152,9 @@ const db = isthmica.pg.connect<DB>({ connectionString: process.env.DATABASE_URL 
 ```
 
 `@isthmica/db-ops`'s default export bundles every backend namespace
-(`pg`, `prisma`) into one object, for projects that prefer one import over
-several named ones. The named exports (`pg`, `prisma`) work identically —
-use whichever reads better in your codebase.
+(`pg`, `prisma`, `mysql`) into one object, for projects that prefer one
+import over several named ones. The named exports (`pg`, `prisma`,
+`mysql`) work identically — use whichever reads better in your codebase.
 
 `@isthmica/db-ops` also re-exports everything `@isthmica/core` exports, so
 a project using both packages can import from just one place:
@@ -193,33 +222,47 @@ first use) if you pass a `primaryKey` that doesn't exist on the table.
 Composite keys aren't supported — pick the single column that uniquely
 identifies a row for `get`/`update`/`delete` purposes.
 
-### A naming detail that matters here specifically
+### Object key vs. declared column name — handled for you here
 
-`get`/`update`/`delete` reference columns by their **object key** in the
-`table()` definition (e.g. `id`), not by the string passed to
-`text()`/`serial()`/etc. — see the naming note in
-[`schema-dsl.md`](./schema-dsl.md#a-naming-detail-object-key-vs-declared-column-name)
-for why, and what to do if your DB columns are named differently from your
-JS object keys.
+Every `Repository` method's public shape (`get`/`insert`/`update`'s
+parameters and return values) is **object-key-shaped** (`tenantId`), the
+same as `$inferSelect`/`$inferInsert` elsewhere in this doc set — even
+though the underlying Kysely queries `createRepository` builds internally
+reference each column's *declared* name (`tenant_id`; see
+[`schema-dsl.md`](./schema-dsl.md#object-key-vs-declared-column-name--resolved)
+for the full explanation of that split). `createRepository` translates
+between the two at its boundary (`toRawRecord`/`fromRawRow` internally) so
+you never have to think about it: pass and receive `tenantId`, regardless
+of what the real column is named.
+
+The primary-key `primaryKey` option (above) is the one place this still
+surfaces directly — it's specified by object key (`{ primaryKey: "orderId" }`),
+not declared name, matching every other `Repository` boundary.
 
 ## Testing
 
-`@isthmica/db-ops`'s own test suite (`packages/db-ops/test`) uses two
-different approaches, matching what each module actually needs:
+`@isthmica/db-ops`'s own test suite (`packages/db-ops/test`) uses different
+approaches per module, matching what each actually needs:
 
-- `pg.test.ts` — compile-only, same pattern as `@isthmica/core`'s tests
-  (see [`best-practices.md`](./best-practices.md#testing-without-a-live-database)):
-  a `pg.Pool` that's never connected, asserting on compiled SQL text.
+- `pg.test.ts` / `mysql.test.ts` — compile-only, same pattern as
+  `@isthmica/core`'s tests (see
+  [`best-practices.md`](./best-practices.md#testing-without-a-live-database)):
+  a pool that's never connected, asserting on compiled SQL text.
+  `mysql.test.ts` specifically asserts on *dialect-specific* differences
+  (backtick identifier quoting, `?` placeholders) rather than just "it
+  compiles," so it isn't a copy-paste of the pg test that happens to pass.
 - `repository.test.ts` — a **real, executed** round trip (insert → get →
   update → delete) against an in-memory SQLite database via
-  `better-sqlite3`. Isthmica has no migrations engine yet, so the test
-  creates its own schema directly via Kysely's schema builder rather than
-  from the `table()` definitions. This is what actually caught two real
-  bugs while this package was being built — see
-  [`known-risks.md`](./known-risks.md#discovered-while-building-db-ops) —
-  neither of which a compile-only test would have surfaced, since both were
-  about runtime values (a missing optional-property split, an
-  unbindable `Date`), not query shape.
+  `better-sqlite3`. The test creates its own schema directly via Kysely's
+  schema builder rather than from the `table()` definitions — `db-ops`
+  deliberately doesn't depend on `@isthmica/migrations` for this, keeping
+  the two optional packages independent of each other. This is what
+  actually caught real bugs while this package was being built — see
+  [`known-risks.md`](./known-risks.md#fixed--closed-not-just-documented) —
+  none of which a compile-only test would have surfaced, since they were
+  all about runtime values or execution-time SQL validity, not query shape.
 
 There's no test exercising the Prisma backend, for the reason stated above:
-no generated Prisma client exists in this repo to test against.
+no generated Prisma client exists in this repo to test against. Similarly,
+no live MySQL server exists to integration-test the `mysql` backend beyond
+its compile-only tests.

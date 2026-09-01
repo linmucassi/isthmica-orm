@@ -16,11 +16,16 @@ import { text, serial, timestamp } from "@isthmica/core";
 | `serial(name)` | `number` | `number \| undefined` | Not-null and has-default from the start — matches a Postgres `SERIAL`/auto-increment column, which is always generated |
 | `timestamp(name)` | `Date \| null` | `Date \| null` | |
 
-Every builder returns a `ColumnBuilder<TSelect, TInsert>` with two type
-parameters tracked separately: what you get back from a `SELECT`, and what's
-required (vs. optional) on an `INSERT`. This split is what lets a
-`serial().primaryKey()` id be typed as `number` on read but *optional* on
-write — the database generates it.
+Every builder returns a `ColumnBuilder<TName, TSelect, TInsert>` with three
+type parameters: `TName` is the declared column name as a string literal
+type (the actual argument you passed in — this is what lets
+`InferRawTable` key Kysely's `Database` type by the real column name, not
+by whatever object key you happen to store the builder under — see
+[`InferDatabase`](#inferdatabase) below); `TSelect`/`TInsert` track what
+you get back from a `SELECT` and what's required (vs. optional) on an
+`INSERT` separately. That split is what lets a `serial().primaryKey()` id
+be typed as `number` on read but *optional* on write — the database
+generates it.
 
 ### Chainable modifiers
 
@@ -29,14 +34,14 @@ mutate the one you called it on:
 
 ```ts
 text("tenant_id").notNull()
-// ColumnBuilder<string, string>  — null excluded from both select and insert
+// ColumnBuilder<"tenant_id", string, string>  — null excluded from both select and insert
 
 serial("id").primaryKey()
-// ColumnBuilder<number, number | undefined>
+// ColumnBuilder<"id", number, number | undefined>
 // isPrimaryKey / isNotNull / hasDefault all become true
 
 timestamp("created_at").defaultNow()
-// ColumnBuilder<Date | null, Date | undefined>
+// ColumnBuilder<"created_at", Date | null, Date | undefined>
 // hasDefault becomes true — insert is optional, DB fills it in
 ```
 
@@ -49,51 +54,44 @@ returns `undefined`.
 
 Beyond the type-level tracking, every `ColumnBuilder` carries plain runtime
 fields: `name`, `dataType` (`"text" | "serial" | "timestamp"`),
-`isPrimaryKey`, `isNotNull`, `hasDefault`. **Nothing in `@isthmica/core`
-consumes these yet** — no migration generator, no DDL introspection exists
-today (see [`roadmap.md`](./roadmap.md), Phase 1). They're populated now
-because the migrations engine will need them, not because anything reads
-them currently. Don't rely on them for application logic; they're there for
-Isthmica's own future tooling.
+`isPrimaryKey`, `isNotNull`, `hasDefault`. These now have a real consumer:
+`@isthmica/migrations`' `generateCreateTable` reads all five to drive
+Kysely's schema builder — see [`migrations.md`](./migrations.md), including
+a documented heuristic limit on how `hasDefault` is currently interpreted.
+Don't rely on them for other application logic beyond that; the exact set
+of fields is shaped by what DDL generation needs, not a general
+introspection API.
 
-### A naming detail: object key vs. declared column name
+### Object key vs. declared column name — resolved
 
-Read this before naming a column differently from its DB column, e.g.
-`tenantId: text("tenant_id")`:
+An earlier version of this DSL stored the string passed to
+`text()`/`serial()`/`timestamp()` as metadata only, without wiring it into
+query generation — Kysely's typed queries referenced the **object key**
+(`tenantId`) instead of the **declared name** (`tenant_id`), silently
+producing SQL that referenced a column that might not exist. Fixed: see
+[`known-risks.md`](./known-risks.md#fixed--closed-not-just-documented).
 
-**The string passed to `text()`/`serial()`/`timestamp()` — the intended real
-DB column name — is currently metadata only.** It's stored on
-`ColumnBuilder.name` (see above), but nothing uses it to determine what
-identifier Kysely's typed queries actually reference. That's the **object
-key** you used in the `columns` record (`tenantId` in the example above),
-because that's the key `InferRawTable`/`InferDatabase` carries through into
-the `Database` type Kysely compiles queries against.
+**Current, correct behavior:** `ColumnBuilder`'s `TName` type parameter
+(see [above](#column-builders)) carries the declared name as a literal
+type, and `InferRawTable` (which `InferDatabase` uses) keys Kysely's raw
+`Database` type by it. So `table("orders", { tenantId: text("tenant_id") })`
+produces a `Database` type where the column is keyed `tenant_id`, and
+`db.selectFrom("orders").where("tenant_id", "=", x)` — using the *declared
+name*, not the object key — is what actually typechecks and compiles
+correctly.
 
-Concretely: `table("orders", { tenantId: text("tenant_id") })` produces a
-Kysely `Database` type where the column is keyed `tenantId`, and
-`db.selectFrom("orders").where("tenantId", "=", x)` compiles to
-`where "tenantId" = $1` — **not** `where "tenant_id" = $1`. If your real
-Postgres table has a column literally named `tenant_id`, that query
-references a column that doesn't exist.
+**`InferSelect`/`InferInsert`/`InferUpdate` (JS-facing — `$inferSelect`,
+`$inferInsert`, and `@isthmica/db-ops`'s `createRepository`) deliberately
+stay keyed by object key**, not declared name — see
+[`InferDatabase`](#inferdatabase) below for why that split exists and how
+it's kept correct.
 
-Two ways to actually get this right today:
-
-1. **Make the object key match the real DB column name exactly** — e.g.
-   `tenant_id: text("tenant_id")`, and reference it the same way everywhere
-   (`.where("tenant_id", ...)`, `row.tenant_id`). Not idiomatic camelCase JS,
-   but correct with zero extra setup.
-2. **Install Kysely's own `CamelCasePlugin`** (`import { CamelCasePlugin } from "kysely"`,
-   added to the `Kysely` constructor's `plugins` array) if you want camelCase
-   JS keys over snake_case DB columns — it transforms outgoing identifiers
-   and incoming result keys transparently. This is a real, official Kysely
-   plugin, not something Isthmica wires in for you.
-
-`@isthmica/core` doesn't currently do either of these automatically, and the
-`name` argument existing without being load-bearing is genuinely easy to
-misread as "this is the real column name, use whatever object key you like"
-— it was misread exactly that way while writing this project's own docs and
-tests before this note existed. See
-[`known-risks.md`](./known-risks.md#discovered-while-building-db-ops).
+If you want camelCase JS keys over snake_case DB columns at the raw Kysely
+query level too (not just through `@isthmica/db-ops`'s repository layer,
+which already handles this translation for you), install Kysely's own
+`CamelCasePlugin` (`import { CamelCasePlugin } from "kysely"`, added to the
+`Kysely` constructor's `plugins` array) — a real, official Kysely plugin,
+not something Isthmica wires in for you.
 
 ## `table()`
 
@@ -120,18 +118,26 @@ Signature: `table(name, columns, options?) => TableDefinition`.
 interface TableOptions {
   readonly softDelete?: boolean;
   readonly audit?: boolean;
+  readonly partitionBy?: {
+    readonly type: "range";
+    readonly column: string;
+    readonly interval: "month";
+  };
 }
 ```
 
 - **`softDelete`** — ✅ implemented. Wiring this to `true` and passing the
   table through `withSoftDelete()` (see [`soft-delete.md`](./soft-delete.md))
-  installs the read-scoping plugin for this table.
-- **`audit`** — 📋 planned, not implemented. Setting it does nothing right
-  now; there's no code anywhere that reads `options.audit`.
-
-`partitionBy`, mentioned in the original project plan, isn't even in the
-`TableOptions` type yet — it'll be added when partitioning
-([`roadmap.md`](./roadmap.md), Phase 3) is actually built, not before.
+  installs the read-and-write-scoping plugin for this table.
+- **`audit`** — ✅ implemented. Wiring this to `true` and passing the table
+  through `withAudit()` (see [`audit.md`](./audit.md)) captures
+  post-image INSERT/UPDATE/DELETE events for this table.
+- **`partitionBy`** — 🟡 first slice implemented, range/monthly only,
+  Postgres-only, consumed by `@isthmica/migrations`' `generateCreateTable`
+  (`@isthmica/core` itself has no DDL generation — see
+  [`partitioning.md`](./partitioning.md)). `column` is the column's
+  *declared* name, same convention as everywhere else on this page — not
+  the object key.
 
 ### `TableDefinition`
 
@@ -168,29 +174,38 @@ type DB = InferDatabase<typeof tables>;
 const db = new Kysely<DB>({ /* ... */ });
 ```
 
-Two things worth knowing about how it resolves:
+Three things worth knowing about how it resolves — two are stable design,
+one is a bug fix worth understanding so it doesn't regress:
 
 1. **The resulting keys come from each table's *declared* name** (the string
    passed as `table()`'s first argument), not from the property key you used
    in the `tables` object. `{ myOrders: orders }` still produces `DB["orders"]`
    if `orders` was declared as `table("orders", ...)`.
-2. Each column is wrapped in Kysely's own `ColumnType<Select, Insert, Insert>`
-   — Update currently reuses the Insert type rather than having its own
-   third type parameter threaded through (a deliberate MVP simplification,
-   not a Kysely limitation) — and `InferSelect`/`InferInsert`/`InferUpdate`
-   (used for `$inferSelect`/`$inferInsert` and by `@isthmica/db-ops`'s
-   `createRepository`) are Kysely's own `Selectable<T>`/`Insertable<T>`/
-   `Updateable<T>` applied to that wrapped shape — not hand-rolled. An
-   earlier version mapped every column straight through instead
-   (`{ [K in keyof TColumns]: TColumns[K]["$insertType"] }`), which looked
-   equivalent but wasn't: it made a DB-generated column's insert key
-   *required-but-possibly-undefined* rather than *optional*, so
-   `insert({ label: "x" })` failed to typecheck for a table with an
-   auto-generated `id` — defeating the entire point of `.primaryKey()`
-   making insert optional. Caught while building `@isthmica/db-ops`'s
-   repository layer (see [`known-risks.md`](./known-risks.md#discovered-while-building-db-ops)),
-   fixed by reusing Kysely's utilities instead of re-deriving the same
-   logic worse.
+2. **Within a table, `InferRawTable` — what `InferDatabase` actually
+   uses — keys each column by its *declared name* too** (`tenant_id`, not
+   `tenantId`; see [above](#object-key-vs-declared-column-name--resolved)),
+   wrapping each in Kysely's own `ColumnType<Select, Insert, Insert>`
+   (Update currently reuses the Insert type rather than having its own
+   third type parameter threaded through — a deliberate MVP simplification,
+   not a Kysely limitation).
+3. **`InferSelect`/`InferInsert`/`InferUpdate` — used for `$inferSelect`/
+   `$inferInsert` and by `@isthmica/db-ops`'s `createRepository` — are a
+   *separate* mapped type from `InferRawTable`, keyed by object key, not
+   derived from it.** This split is deliberate and was the site of a real
+   bug: an early version of the declared-name fix derived
+   `InferSelect`/`InferInsert`/`InferUpdate` directly from `InferRawTable`
+   (via `Selectable<InferRawTable<T>>` etc.), which silently re-keyed them
+   by declared name too — breaking `@isthmica/db-ops`'s repository tests
+   immediately (caught by `tsc`, not a runtime surprise). Fixed by giving
+   `InferSelect`/`InferInsert`/`InferUpdate` their own object-key-keyed
+   intermediate type (`InferObjectKeyedRawTable` in `table.ts`), applying
+   Kysely's `Selectable`/`Insertable`/`Updateable` to *that* instead. Those
+   utilities are still the right tool here — reusing them (rather than a
+   hand-rolled mapped type) is what makes a DB-generated column's insert
+   key correctly *optional* rather than *required-but-possibly-undefined*,
+   which was a separate, earlier bug in the same area. See
+   [`known-risks.md`](./known-risks.md#fixed--closed-not-just-documented)
+   for both.
 
 ## What's not here yet
 
@@ -198,6 +213,8 @@ Two things worth knowing about how it resolves:
   listed above exist. Adding more is mechanical (follow the same pattern as
   `text`/`serial`/`timestamp`) but hasn't been done.
 - No foreign-key declaration syntax.
-- No `partitionBy` option (Phase 3).
-- No way to generate actual `CREATE TABLE` DDL from a `table()` definition —
-  that's the migrations engine, not yet built (Phase 1).
+- No `list`/`hash` partitioning (only `range`/monthly — see
+  [`partitioning.md`](./partitioning.md)).
+- `@isthmica/core` itself still has no DDL generation — `generateCreateTable`
+  lives in the separate `@isthmica/migrations` package (see
+  [`migrations.md`](./migrations.md)), not here.

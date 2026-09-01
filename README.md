@@ -9,12 +9,16 @@ tenant isolation, migrations, and partitioning.
 > connection between application code and the database — this project takes
 > that literally.
 
-**Status: early-stage.** Phase 0 is partially built — the schema DSL and
-soft delete are implemented and tested; everything else described below is
-either the plan or a documented open risk. See
-[`docs/roadmap.md`](./docs/roadmap.md) for the honest breakdown and
-[`docs/known-risks.md`](./docs/known-risks.md) before betting anything on a
-feature that isn't marked implemented.
+**Status: early-stage, actively growing.** The schema DSL, soft delete
+(read *and* write scoping), audit/CDC, and a first slice of compile-time
+tenant isolation are implemented and tested in `@isthmica/core`.
+`@isthmica/db-ops` (connection helpers, CRUD ergonomics) and
+`@isthmica/migrations` (DDL generation, schema diffing, partitioning) are
+two further optional packages, also implemented and tested. Several pieces
+are deliberately bounded first slices, not the full original vision — see
+[`docs/roadmap.md`](./docs/roadmap.md) for exactly what's covered where,
+and [`docs/known-risks.md`](./docs/known-risks.md) before betting anything
+on a boundary you haven't checked.
 
 ## Why
 
@@ -86,16 +90,37 @@ await orderRepo.delete(order.id); // soft-deletes automatically — see docs/db-
 ```
 
 `db-ops` also wires up Prisma-managed connections (`prisma.connect(...)`)
-for projects that already configure credentials through Prisma. Full
-reference, including the two backends and the CRUD layer's limits, in
-[`docs/db-ops.md`](./docs/db-ops.md).
+and MySQL (`mysql.connect(...)`, via `mysql2`) for projects that need
+either. Full reference, including all three backends and the CRUD layer's
+limits, in [`docs/db-ops.md`](./docs/db-ops.md).
+
+### Audit and tenant isolation
+
+```ts
+import { withAudit, tenantScoped } from "@isthmica/core";
+
+// post-image capture on INSERT/UPDATE/DELETE for any table with { audit: true }
+const auditedDb = withAudit(db, tables, (event) => console.log(event));
+
+// compile-time guarantee: this does not typecheck without .forTenant(...)
+const myOrders = await tenantScoped(db, "orders", "tenant_id")
+  .where("status", "=", "open")
+  .forTenant(currentTenantId)
+  .execute();
+```
+
+Both are real, tested first slices with explicit, documented boundaries —
+audit is post-image only, tenant isolation covers single-table `SELECT`
+only. See [`docs/audit.md`](./docs/audit.md) and
+[`docs/tenant-isolation.md`](./docs/tenant-isolation.md) before relying on
+either beyond that.
 
 ## Install
 
 This is an npm-workspaces monorepo, not yet a published package (`isthmica`,
-`isthmica-orm`, `isthmicadb`, and `@isthmica/core` are all confirmed
-unpublished on the npm registry as of this writing). Clone and work inside
-the workspace:
+`isthmica-orm`, `isthmicadb`, `@isthmica/core`, `@isthmica/db-ops`, and
+`@isthmica/migrations` are all confirmed unpublished on the npm registry as
+of this writing). Clone and work inside the workspace:
 
 ```bash
 git clone <repo-url> isthmica
@@ -115,8 +140,12 @@ Full requirements and layout: [`docs/installation.md`](./docs/installation.md).
 | [`docs/installation.md`](./docs/installation.md) | Requirements, install steps, workspace layout |
 | [`docs/getting-started.md`](./docs/getting-started.md) | Define a schema, wire it to Kysely, run your first soft-deleted query |
 | [`docs/schema-dsl.md`](./docs/schema-dsl.md) | `column()` builders, `table()`, `InferDatabase` — full API reference |
-| [`docs/soft-delete.md`](./docs/soft-delete.md) | How the soft-delete plugin actually works, including the write-side caveat |
-| [`docs/db-ops.md`](./docs/db-ops.md) | `@isthmica/db-ops` — optional connection setup (`pg`, `prisma`) and CRUD ergonomics (`createRepository`) |
+| [`docs/soft-delete.md`](./docs/soft-delete.md) | How the soft-delete plugin works — read and write scoping, aliasing, the `.deleteFrom()` boundary |
+| [`docs/audit.md`](./docs/audit.md) | Post-image audit/CDC capture on INSERT/UPDATE/DELETE |
+| [`docs/tenant-isolation.md`](./docs/tenant-isolation.md) | The compile-time tenant-scoping guarantee — and its explicit single-table-`SELECT` boundary |
+| [`docs/db-ops.md`](./docs/db-ops.md) | `@isthmica/db-ops` — optional connection setup (`pg`, `prisma`, `mysql`) and CRUD ergonomics (`createRepository`) |
+| [`docs/migrations.md`](./docs/migrations.md) | `@isthmica/migrations` — DDL generation, schema diffing, diff application |
+| [`docs/partitioning.md`](./docs/partitioning.md) | Declarative range partitioning + DDL |
 | [`docs/architecture.md`](./docs/architecture.md) | Why it's built on Kysely, "no external engine process," and what that does and doesn't mean |
 | [`docs/best-practices.md`](./docs/best-practices.md) | Practical guidance for the parts that exist today |
 | [`docs/roadmap.md`](./docs/roadmap.md) | Phased plan, and what's actually shipped vs. still ahead |
@@ -124,20 +153,31 @@ Full requirements and layout: [`docs/installation.md`](./docs/installation.md).
 
 ## What's implemented today
 
-- `@isthmica/core` — schema DSL (`text`/`serial`/`timestamp` columns,
-  `table()`, `InferDatabase`) and soft delete (auto `deleted_at IS NULL`
-  scoping on reads, an explicit `softDeleteUpdate()` for writes, a
-  `withDeleted()` escape hatch).
-- `@isthmica/db-ops` — **optional**, depends on `@isthmica/core` but nothing
-  in `@isthmica/core` depends on it. Connection setup for `pg` (tested
-  end-to-end) and Prisma (implemented, not integration-tested — see
+- **`@isthmica/core`** — schema DSL (`text`/`serial`/`timestamp` columns,
+  `table()`, `InferDatabase`), soft delete (auto `deleted_at IS NULL`
+  scoping on **both** reads and writes, an explicit `softDeleteUpdate()`
+  for the soft-delete itself, a `withDeleted()` escape hatch), audit/CDC
+  (post-image capture via `withAudit`), and a first slice of compile-time
+  tenant isolation (`tenantScoped()` — single-table `SELECT` only).
+- **`@isthmica/db-ops`** — optional, depends on `@isthmica/core` but
+  nothing in `@isthmica/core` depends on it. Connection setup for `pg`
+  (tested end-to-end), Prisma, and MySQL (both implemented, not
+  integration-tested against a live server — see
   [`docs/known-risks.md`](./docs/known-risks.md)), plus a
   `createRepository()` CRUD layer (get/insert/update/delete).
+- **`@isthmica/migrations`** — optional, depends on `@isthmica/core`,
+  independent of `db-ops`. DDL generation from `table()` definitions,
+  schema diffing, diff application, and declarative range partitioning —
+  all a deliberately bounded first slice of the originally-planned
+  migrations engine (no linter, no shadow-DB dry runs, no assisted
+  rename-confirmation flow yet — see
+  [`docs/migrations.md`](./docs/migrations.md)).
 
-That's the complete list. Audit/CDC, tenant isolation, migrations, and
-partitioning are designed but not yet built — see
-[`docs/roadmap.md`](./docs/roadmap.md).
+Still not built: an index advisor, schema branching, a type-safe
+seed/fixture system, and a Studio-equivalent GUI. See
+[`docs/roadmap.md`](./docs/roadmap.md) for the full phase-by-phase
+breakdown, including exactly which "first slice" boundaries apply where.
 
 ## License
 
-Not yet chosen — no `LICENSE` file exists in this repository yet.
+[Apache-2.0](./LICENSE).

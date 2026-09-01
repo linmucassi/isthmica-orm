@@ -1,9 +1,10 @@
 # Getting started
 
-This walks through everything that's actually implemented today: defining a
-schema, wiring it to a real Kysely/Postgres connection, and using soft
-delete. Every snippet below is runnable against the current
-`@isthmica/core` API — nothing here is aspirational.
+This walks through the core workflow: defining a schema, wiring it to a
+real Kysely/Postgres connection, and using soft delete. Every snippet below
+is runnable against the current `@isthmica/core` API — nothing here is
+aspirational. Audit, tenant isolation, and migrations each get their own
+focused page (linked at the bottom) rather than being folded in here.
 
 ## 1. Install Kysely and a Postgres driver
 
@@ -40,19 +41,20 @@ export const tenants = table("tenants", {
 export const tables = { orders, tenants };
 ```
 
-The third argument to `table()` — `{ softDelete: true }` — is the only table
-option implemented today. `audit` and `partitionBy` are part of the planned
-DSL surface (see [`roadmap.md`](./roadmap.md)) but do nothing yet if you set
-them; there's no code that reads them.
+`{ softDelete: true }` is one of three implemented `table()` options —
+`audit` (see [`audit.md`](./audit.md)) and `partitionBy` (see
+[`partitioning.md`](./partitioning.md)) are the other two.
 
-**Before you point this at a real database:** `tenantId: text("tenant_id")`
-above only works end-to-end if your actual Postgres column is named
-`tenantId`, not `tenant_id` — the string passed to `text()` isn't wired to
-query generation yet. Read
-[`schema-dsl.md`'s naming note](./schema-dsl.md#a-naming-detail-object-key-vs-declared-column-name)
-before choosing real column names; it explains both correct options (match
-the object key to the DB column exactly, or install Kysely's own
-`CamelCasePlugin`).
+**Naming note:** `tenantId: text("tenant_id")` above — object key
+`tenantId`, declared name `tenant_id` — is the normal case, and it's
+handled correctly: Kysely's typed queries (and `@isthmica/db-ops`'s
+`createRepository`) reference the column by its *declared* name
+(`tenant_id`), while `$inferSelect`/`$inferInsert` and `createRepository`'s
+public shape stay keyed by the *object key* (`tenantId`) for JS-side
+ergonomics. See
+[`schema-dsl.md`'s naming section](./schema-dsl.md#object-key-vs-declared-column-name--resolved)
+for the full explanation of that split, including why it's two separate
+things rather than one.
 
 ## 3. Build the Kysely `Database` type from your schema
 
@@ -93,10 +95,12 @@ const openOrders = await db
   .execute();
 
 // joins are scoped too: any joined table that declared softDelete: true
-// also gets its own deleted_at IS NULL filter, table-qualified
+// also gets its own deleted_at IS NULL filter, table-qualified.
+// Note the join condition references "orders.tenant_id" — the declared
+// column name, not the "tenantId" object key (see the naming note above).
 const withTenant = await db
   .selectFrom("orders")
-  .innerJoin("tenants", "tenants.id", "orders.tenantId")
+  .innerJoin("tenants", "tenants.id", "orders.tenant_id")
   .selectAll()
   .execute();
 ```
@@ -116,9 +120,9 @@ const everyOrderIncludingDeleted = await withDeleted(db)
 
 `withDeleted()` is a thin wrapper over Kysely's own `db.withoutPlugins()`. It
 turns off *all* plugins registered on the instance, not just soft delete —
-today that's the only plugin Isthmica installs, so the distinction doesn't
-matter yet, but it will once audit/CDC plugins exist (see
-[`roadmap.md`](./roadmap.md)).
+if a table also has `audit: true` (see [`audit.md`](./audit.md)),
+`withDeleted()` silences audit capture on it too. There's no more targeted
+"bypass just this one plugin" mechanism yet.
 
 ## 6. Deleting a row — this is not `.deleteFrom()`
 
@@ -139,7 +143,9 @@ await softDeleteUpdate(db, "orders")
   .where("id", "=", orderId)
   .execute();
 
-// SQL: update "orders" set "deleted_at" = $1 where "id" = $2
+// SQL: update "orders" set "deleted_at" = current_timestamp where "id" = $1
+// (current_timestamp is a SQL expression, not a bound parameter — see
+// soft-delete.md for why it's not a JS Date)
 ```
 
 `softDeleteUpdate(db, table, deletedAtColumn?)` runs against
@@ -151,4 +157,7 @@ pass a different string if your column is named something else.
 
 - [`schema-dsl.md`](./schema-dsl.md) — full reference for `column()` builders, `table()`, and the inference types.
 - [`soft-delete.md`](./soft-delete.md) — how the plugin actually rewrites queries, and its current limits.
+- [`audit.md`](./audit.md) — post-image capture on INSERT/UPDATE/DELETE.
+- [`tenant-isolation.md`](./tenant-isolation.md) — the compile-time tenant-scoping guarantee.
+- [`migrations.md`](./migrations.md) — generating DDL and diffing schemas from `table()` definitions.
 - [`best-practices.md`](./best-practices.md) — patterns for testing, escape-hatch usage, and schema conventions.

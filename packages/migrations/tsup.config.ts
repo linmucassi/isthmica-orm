@@ -6,13 +6,5 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  external: [
-    "kysely",
-    "pg",
-    "mysql2",
-    "@prisma/client",
-    "@prisma/adapter-pg",
-    "prisma-extension-kysely",
-    "@isthmica/core",
-  ],
+  external: ["kysely", "@isthmica/core"],
 });

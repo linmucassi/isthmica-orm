@@ -7,30 +7,30 @@ timeline to anything marked still-open below.
 
 ## Still open
 
-### Tenant-isolation type enforcement — the core unresolved bet
+### Tenant-isolation type enforcement — first slice shipped, still bounded
 
-Not started. This is the single hardest technical bet in the project: making
-a query that omits a required `tenantId` filter fail to *typecheck*, not
-just fail at runtime. The planned mechanism is a type-state wrapper around
-Kysely's builder classes (`SelectQueryBuilder`, `InsertQueryBuilder`,
-`UpdateQueryBuilder`, `DeleteQueryBuilder`) — a phantom type tracking
-"tenant scope applied," with `.execute()` gated on it.
+**Partially resolved.** A first, real, tested implementation exists —
+`tenantScoped()` in `@isthmica/core` (see
+[`tenant-isolation.md`](./tenant-isolation.md)) makes a single-table
+`SELECT` fail to *typecheck* if `.forTenant(id)` hasn't been called, via a
+phantom-typed wrapper with `.execute()`/`.compile()`/`.executeTakeFirst()`
+gated by a polymorphic `this` parameter. This was verified to genuinely
+reject the unguarded call (not just silently accept a suppressed error) —
+see the test file for how.
 
-This is a **different and harder mechanism** than the AST-rewriting the
-soft-delete plugin uses (see [`architecture.md`](./architecture.md) for why
-those two shouldn't be treated as validating each other). Concretely, it
-requires re-implementing every chainable method across four separate
-builder classes to thread the phantom type through composition — not
-extending a documented extension point, but mirroring Kysely's internal
-generic signatures. Before this goes any further:
+**Still explicitly out of scope**, per the original plan and unchanged by
+this slice: joins, subqueries, and INSERT/UPDATE/DELETE. The wrapper only
+covers single-table `SELECT`. Extending it to those cases is a real,
+separate design effort — the current implementation doesn't generalize to
+them automatically.
 
-- Prototype against a join, a subquery, and a dynamically-built conditional
-  `.where()` chain (a common real-world pattern) — not just the simple
-  single-table case.
-- Decide up front whether a future Kysely major-version bump is a "patch our
-  wrapper" event or a "pin and lag" event, since this wrapper couples to
-  Kysely's internal builder types more deeply than the soft-delete plugin
-  does.
+**New risk surfaced by shipping it:** this guarantee is only real if
+`npm run typecheck` actually runs before code merges. **This repo has no CI
+configured** (no `.github/workflows` directory exists). A
+`// @ts-expect-error` test proves the mechanism works when someone runs
+`tsc`, but `vitest` transpiles via esbuild and never type-checks — a
+regression here would pass the test suite silently. See
+[`best-practices.md`](./best-practices.md#dependency-hygiene).
 
 ### N+1 query detection
 
@@ -55,14 +55,18 @@ production. Needs a dedicated design spike before any timeline commitment.
 Deliberately kept out of the phased roadmap (see `roadmap.md`) rather than
 scheduled into Phase 3 by default.
 
-### Migration rename disambiguation
+### Migration rename disambiguation — still unsolved, now with a concrete shape
 
-Distinguishing a column rename from a drop-and-recreate is a structurally
-ambiguous diff — every major migration tool (Rails, Django, Prisma Migrate)
-routes this through a human confirmation rather than guessing, and Isthmica
-is planned to do the same. The UX for that confirmation flow (how many
-prompts is too many vs. how much silent-wrong-guessing is acceptable) hasn't
-been designed. Migrations (Phase 1) haven't started at all.
+`@isthmica/migrations`' `diffSchemas` (see [`migrations.md`](./migrations.md))
+exists now, and it does exactly what was planned here: a renamed column
+(same object key with a new declared name, or vice versa) shows up as a
+plain drop+add pair, not a detected rename. That's the honest,
+explicitly-chosen non-solution — not an accident. What's still genuinely
+unbuilt: the *assisted* confirmation flow (detect the ambiguous case,
+prompt a human, let them confirm rename vs. drop+recreate) that every major
+migration tool (Rails, Django, Prisma Migrate) has and this doesn't yet.
+There's no CLI in this project at all yet, so there's nowhere for such a
+prompt to live regardless.
 
 ### Prisma backend (`@isthmica/db-ops`) not integration-tested
 
@@ -77,89 +81,151 @@ optional peer dependencies not installed here. See
 implemented-per-documentation, not verified-working, until someone runs it
 against a real Postgres + Prisma 7 setup.
 
+### MySQL backend (`@isthmica/db-ops`) not integration-tested
+
+Same situation as Prisma, one step further removed: `mysql.connect()` is
+implemented against Kysely's documented `MysqlDialect`/`MysqlPool`
+structural interface (verified against Kysely's own source) and the
+standard `mysql2` pairing, but has never run against a live MySQL server —
+this repo has no MySQL instance to test against, only compile-only tests
+(see [`db-ops.md`](./db-ops.md#mysql-backend)). `mysql2`'s exact
+`Pool.end()` callback signature was not individually re-verified against
+Kysely's expected shape beyond structural typechecking passing.
+
+### Partitioning DDL not verified against live Postgres
+
+`generateCreateTable`'s `PARTITION BY RANGE` clause and
+`generateRangePartition`'s `PARTITION OF ... FOR VALUES FROM ... TO ...`
+(see [`partitioning.md`](./partitioning.md)) are compile-only tested — no
+live Postgres exists anywhere in this project, and SQLite doesn't support
+partitioning at all (the `dialect: "sqlite"` option throws for a partitioned
+table rather than silently ignoring `partitionBy`). Same honesty bar
+already applied to the soft-delete plugin: implemented-per-documentation,
+not execution-verified.
+
+### Adding a NOT NULL column without a default fails against non-empty tables
+
+Found while testing `@isthmica/migrations`' `applyMigration`, not a
+hypothetical: adding a `.notNull()` column to a table that already has rows
+fails at the database level (every existing row would get `NULL` for the
+new column, violating the constraint being added in the same statement).
+This is real, current, and *not* solved by expand/contract splitting (add
+nullable → backfill → add constraint) — that's a deliberately separate,
+larger Phase 1 item, not something this first migrations slice attempts.
+There's a regression test confirming this throws rather than silently
+producing an inconsistent schema — see
+[`migrations.md`](./migrations.md#known-limitations).
+
+### `pg`/`mysql2` static-vs-dynamic import asymmetry in `@isthmica/db-ops`
+
+`pg.ts` uses a static top-level `import ... from "pg"`, while `prisma.ts`
+and `mysql.ts` both use dynamic `import()` specifically so requiring
+`@isthmica/db-ops` doesn't force those optional peers to be installed.
+`pg` doesn't get the same treatment — it's treated as the assumed default
+dialect throughout this project's docs (the README's quick example,
+`db-ops.md`'s primary walkthrough), so importing *anything* from
+`@isthmica/db-ops` today technically requires `pg` to be installed even if
+you only intend to use `mysql`/`prisma`. In practice this is narrow (most
+consumers reaching for this package have `pg` installed anyway, since it's
+the only fully-supported `@isthmica/core` dialect), but it's a real,
+un-fixed inconsistency, not a deliberate design choice — flagged here
+rather than left silently inconsistent. Converting `pg.connect()` to an
+async, dynamically-imported function would fix it but is a breaking API
+change to already-documented, already-tested code, so it wasn't done as a
+side effect of adding the `mysql2` backend.
+
 ### Package/domain naming
 
-`isthmica`, `isthmica-orm`, `isthmicadb`, and `@isthmica/core` were
-confirmed unpublished on the npm registry directly (all four return HTTP
-404, checked via `registry.npmjs.org`, not just assumed from an earlier
-draft). Domain availability (`isthmica.dev` / `.io`) has not been checked
-from this environment. A formal trademark search (USPTO/EUIPO or
-equivalent) has not been done and is recommended before any public launch.
+`isthmica`, `isthmica-orm`, `isthmicadb`, `@isthmica/core`, `@isthmica/db-ops`,
+and `@isthmica/migrations` were confirmed unpublished on the npm registry
+directly (all return HTTP 404, checked via `registry.npmjs.org`, not just
+assumed from an earlier draft). Domain availability (`isthmica.dev` / `.io`)
+has not been checked from this environment. A formal trademark search
+(USPTO/EUIPO or equivalent) has not been done and is recommended before any
+public launch.
 
-## Discovered during implementation — new since the plan was written
+## Fixed — closed, not just documented
 
-### Soft delete doesn't scope writes against already-deleted rows
+These were real, discovered bugs — each has a regression test, not just a
+note. Kept here (rather than deleted) so the fix and its context stay
+visible, matching how this project handles every correction.
 
-Found while building the plugin, not anticipated in planning: the AST
-transformer only overrides `transformSelectQuery`. An `UPDATE` (or a raw
-`.deleteFrom()`) targeting a row that's already soft-deleted is not blocked
-— see [`soft-delete.md`](./soft-delete.md#what-it-does-not-do). This is a
-real, current gap, not a hypothetical one. If your application logic depends
-on "you can't update a soft-deleted row," you need to add that check
-yourself for now.
+### Soft-delete plugin referenced the real table name instead of the alias
 
-## Discovered while building db-ops
+Found via the external edge-case test suite, not this repo's own tests:
+`.selectFrom("orders as o")` used to produce a filter referencing
+`"orders"."deleted_at"` — out of scope after aliasing, a real SQL error
+against a live database. Fixed in
+`packages/core/src/plugins/soft-delete.ts`: `extractTableRef` (now shared
+with `audit.ts` via `plugins/table-name.ts`) tracks the alias separately
+from the real name used only for matching against configured tables. See
+[`soft-delete.md`](./soft-delete.md).
 
-Building `@isthmica/db-ops`'s repository layer (`get`/`insert`/`update`/`delete`
-— see [`db-ops.md`](./db-ops.md)) exercised `@isthmica/core`'s schema DSL in
-ways the DSL's own tests hadn't: writing real insert/update calls with
-partial data, and running the soft-delete write path against a second SQL
-dialect. Both surfaced real, previously-undiscovered issues in already-shipped
-`@isthmica/core` code — fixed as part of this work, not left for later:
+### Soft delete didn't scope writes against already-deleted rows
+
+The AST transformer used to only override `transformSelectQuery`. An
+`UPDATE` against a row that's already soft-deleted now affects 0 rows by
+default (via a new `transformUpdateQuery` override, sharing the same
+filter-building logic) — a deliberate behavior change, not just a doc
+update. `.deleteFrom()` remains intentionally unscoped (Kysely's plugin API
+can't turn a real `DELETE` into an `UPDATE` — see
+[`soft-delete.md`](./soft-delete.md#why-deletefrom-is-not-intercepted)).
+
+### Column object key vs. declared column name
+
+The string passed to `text()`/`serial()`/`timestamp()` (e.g.
+`text("tenant_id")`) used to be metadata-only — Kysely's typed queries
+referenced the object key (`tenantId`), not the declared name. Fixed by
+giving `ColumnBuilder` a literal-string `TName` type parameter and rekeying
+`InferRawTable` by it. `InferSelect`/`InferInsert`/`InferUpdate`
+(JS-facing) deliberately stay keyed by object key — a *separate* mapped
+type (`InferObjectKeyedRawTable`), not derived from `InferRawTable`,
+because deriving them was tried first and silently re-keyed them too (see
+`table.ts`'s comments). `@isthmica/db-ops`'s `createRepository` now
+translates between the two shapes at its boundary
+(`toRawRecord`/`fromRawRow` in `repository.ts`) so its public API stays
+entirely object-key-shaped. See
+[`schema-dsl.md`](./schema-dsl.md#inferdatabase).
 
 ### `InferInsert`/`InferSelect` didn't mark DB-generated columns optional
 
-The original `InferSelect`/`InferInsert` in `table.ts` mapped every column
-straight through (`{ [K in keyof TColumns]: TColumns[K]["$insertType"] }`).
-That looks right but isn't: a column typed `number | undefined` this way is
-still a **required key** whose value may be `undefined` — not an
-**optional key** you can omit. So `repo.insert({ label: "x" })` for a table
-with an auto-generated `serial().primaryKey()` `id` failed to typecheck,
-silently defeating the entire point of `.primaryKey()`/`.defaultNow()`
-making a field optional on insert. Fixed by rebuilding `InferSelect`/
-`InferInsert`/`InferUpdate` on top of Kysely's own `Selectable<T>`/
-`Insertable<T>`/`Updateable<T>` utilities (which already do the
-required/optional split correctly — that's exactly what they're for)
-instead of a hand-rolled mapped type. See
-[`schema-dsl.md`](./schema-dsl.md#inferdatabase).
+A column typed `number | undefined` via a hand-rolled mapped type is a
+*required* key whose value may be `undefined`, not an *optional* key —
+`repo.insert({ label: "x" })` for a table with an auto-generated `id`
+failed to typecheck. Fixed by building `InferSelect`/`InferInsert`/
+`InferUpdate` on Kysely's own `Selectable`/`Insertable`/`Updateable`
+utilities instead. See [`schema-dsl.md`](./schema-dsl.md#inferdatabase).
 
 ### `softDeleteUpdate` used a JS `Date`, which isn't portable
 
-`softDeleteUpdate` set `deleted_at` to a plain `new Date()`. That happens to
-work against Postgres because the `pg` driver serializes JS `Date` objects,
-but it isn't SQL — SQLite's driver (`better-sqlite3`, used in `db-ops`'s own
-repository tests) throws on a bound `Date`, accepting only numbers, strings,
-bigints, buffers, and `null`. Fixed by switching to
-`sql`current_timestamp`` — standard SQL, valid on every dialect, and a
-better default anyway (DB-server clock instead of app-server clock, so
-skew between app instances can't produce inconsistent timestamps). See
+Worked against Postgres (the `pg` driver serializes JS `Date`) but SQLite's
+driver rejects a bound `Date` outright. Fixed with `sql`current_timestamp``
+— standard SQL, valid on every dialect, and arguably better anyway
+(DB-server clock instead of app-server clock). See
 [`soft-delete.md`](./soft-delete.md#api-summary).
 
-### Column object key vs. declared column name — a real gap, not yet fixed
+### `createRepository().update()` with an empty values object
 
-Distinct from the two fixes above: the string passed to
-`text()`/`serial()`/`timestamp()` (e.g. `text("tenant_id")`) is not
-currently wired to query generation at all — Kysely's typed queries
-reference the **object key** you used in the `columns` record, not that
-string. This is fully documented (with both workarounds) in
-[`schema-dsl.md`](./schema-dsl.md#a-naming-detail-object-key-vs-declared-column-name)
-rather than fixed here — making the `name` argument load-bearing would mean
-giving `ColumnBuilder` a third, name-carrying type parameter so
-`InferRawTable` could remap keys at the type level, which is a real (if
-mechanical) type-signature change to `column.ts` and `table.ts` that
-deserves its own pass rather than being folded into an unrelated db-ops
-session. Tracked here as still-open, not silently left undocumented.
+Compiled to `UPDATE ... SET  WHERE ...` — an empty `SET` clause, a raw SQL
+syntax error at the driver rather than a validation error. Easy to hit by
+accident from code that conditionally builds a partial update object.
+Fixed: an empty `values` object now short-circuits to `get(id)`, a true
+no-op. See [`db-ops.md`](./db-ops.md).
 
 ## Mitigated, but not eliminated
 
 ### Coupling to Kysely's `@internal`-marked AST API
 
-The soft-delete plugin (and any future audit/CDC plugin, since it'll use the
-same mechanism) depends on Kysely internals explicitly marked `@internal` in
-source, with no publicly documented plugin-authoring guide backing them.
-This is now implemented and tested, which is meaningfully different from
-"unvalidated" — but it's an **ongoing** risk, not a closed one: it needs
-re-checking on every Kysely upgrade, not just once. See
+Both the soft-delete plugin and the audit plugin (`plugins/table-name.ts`'s
+`extractTableRef`, `OperationNodeTransformer`, `WhereNode`, `ReturningNode`,
+`SelectionNode`, and friends) depend on Kysely internals explicitly marked
+`@internal` in source, with no publicly documented plugin-authoring guide
+backing them. Both are now implemented and tested, which is meaningfully
+different from "unvalidated" — but this is an **ongoing** risk, not a
+closed one: it needs re-checking on every Kysely upgrade. The audit
+plugin's `transformResult`/`WeakMap<QueryId,...>` half sits on firmer
+ground — that exact pattern is documented in `KyselyPlugin`'s own JSDoc,
+unlike the AST-node factories. See
 [`best-practices.md`](./best-practices.md#dependency-hygiene) for the
 specific check to run.
 
@@ -168,7 +234,8 @@ specific check to run.
 Caught during this project's own dependency install, not assumed from a
 changelog: Kysely versions up to and including 0.28.16 have real advisories
 (JSON-path traversal injection, insufficient MySQL backslash escaping),
-fixed in 0.29.5. `@isthmica/core` now pins its dev dependency at `^0.29.5`
-and its peer dependency floor at `^0.29.0`. Closed for this codebase; still
-worth `npm audit`-checking any project consuming it, since a peer dependency
-range doesn't stop a consumer from installing something older.
+fixed in 0.29.5. Every package in this workspace pins its dev dependency at
+`^0.29.5` and its peer dependency floor at `^0.29.0`. Closed for this
+codebase; still worth `npm audit`-checking any project consuming it, since
+a peer dependency range doesn't stop a consumer from installing something
+older.

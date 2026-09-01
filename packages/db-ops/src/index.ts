@@ -1,5 +1,6 @@
 export { pg, pool, connect as connectPg, type PgConnectionOptions } from "./pg.js";
 export { prisma, type PrismaConnectionOptions } from "./prisma.js";
+export { mysql, type MysqlConnectionOptions } from "./mysql.js";
 export {
   createRepository,
   type Repository,
@@ -12,9 +13,10 @@ export {
 // this and remains fully usable on its own — this is purely additive.
 export * from "@isthmica/core";
 
+import { mysql } from "./mysql.js";
 import { pg } from "./pg.js";
 import { prisma } from "./prisma.js";
 
-/** `isthmica.pg.connect(...)`, `isthmica.prisma.connect(...)`, etc. */
-const isthmica = { pg, prisma };
+/** `isthmica.pg.connect(...)`, `isthmica.prisma.connect(...)`, `isthmica.mysql.connect(...)`. */
+const isthmica = { pg, prisma, mysql };
 export default isthmica;

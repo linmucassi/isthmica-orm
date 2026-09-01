@@ -1,6 +1,7 @@
 {
   "name": "@isthmica/db-ops",
   "version": "0.0.1",
+  "license": "Apache-2.0",
   "description": "Optional connection and CRUD ergonomics for @isthmica/core: pool/dialect setup for popular DB libraries (pg, Prisma) plus basic get/insert/update/delete helpers. Entirely optional — @isthmica/core works standalone without this package.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -28,12 +29,14 @@
     "@prisma/adapter-pg": "^7.0.0",
     "@prisma/client": "^7.0.0",
     "kysely": "^0.29.0",
+    "mysql2": "^3.0.0",
     "pg": "^8.13.0",
     "prisma-extension-kysely": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@prisma/adapter-pg": { "optional": true },
     "@prisma/client": { "optional": true },
+    "mysql2": { "optional": true },
     "pg": { "optional": true },
     "prisma-extension-kysely": { "optional": true }
   },
@@ -43,6 +46,7 @@
     "@types/pg": "^8.11.10",
     "better-sqlite3": "^11.5.0",
     "kysely": "^0.29.5",
+    "mysql2": "^3.24.2",
     "pg": "^8.13.1",
     "tsup": "^8.3.5",
     "typescript": "^5.6.3",

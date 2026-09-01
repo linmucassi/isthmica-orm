@@ -14,50 +14,64 @@ every table whose `TableOptions.softDelete` is `true`.
 
 Under the hood, it's built on `OperationNodeTransformer`, which walks
 Kysely's query AST and lets you rewrite specific node kinds. This plugin
-overrides exactly one: `transformSelectQuery`. For every `SELECT` node in
-the tree — including nested subqueries, since the transformer recurses into
-them the same way — it:
+overrides two: `transformSelectQuery` and `transformUpdateQuery`. For every
+`SELECT`/`UPDATE` node in the tree — including nested subqueries, since the
+transformer recurses into them the same way — it:
 
-1. Collects the table names referenced in that `SELECT`'s `FROM` and `JOIN`
-   clauses (handling both plain and aliased tables).
+1. Collects the table references involved (a `SELECT`'s `FROM`/`JOIN`
+   clauses; an `UPDATE`'s target table plus any `FROM`/`JOIN` it has),
+   resolving each to both its *real* declared name (for matching against
+   the configured soft-delete table set) and its *in-scope reference name*
+   — the alias if the query aliased it, otherwise the real name. This
+   real/ref split matters: an earlier version of this plugin used the real
+   name even when the query aliased the table, producing a filter
+   referencing an identifier out of scope after aliasing — a real SQL
+   error, since fixed (see
+   [`known-risks.md`](./known-risks.md#fixed--closed-not-just-documented)).
+   This resolution logic (`extractTableRef`) now lives in a shared
+   `plugins/table-name.ts`, also used by [the audit plugin](./audit.md).
 2. Filters that list down to the ones configured for soft delete.
-3. If any match, builds `<table>.<deletedAtColumn> IS NULL` for each one
-   (using Kysely's own `expressionBuilder`, not hand-built SQL strings), ANDs
-   them together if there's more than one, and ANDs the result onto whatever
-   `WHERE` clause the query already had — or creates one if it didn't have
-   any.
+3. If any match, builds `<ref>.<deletedAtColumn> IS NULL` for each one
+   (using Kysely's own `expressionBuilder`, not hand-built SQL strings —
+   `<ref>` here is the alias when the table was aliased, not the real
+   name), ANDs them together if there's more than one, and ANDs the result
+   onto whatever `WHERE` clause the query already had — or creates one if
+   it didn't have any.
 
 This is why `.innerJoin("tenants", ...)` against `orders` (soft-delete) and
 `tenants` (not) produces `"orders"."deleted_at" is null` but nothing for
-`tenants` — the filter is applied per matched table, not globally.
+`tenants` — the filter is applied per matched table, not globally. And why
+`.selectFrom("orders as o")` produces `"o"."deleted_at" is null`, not
+`"orders"."deleted_at" is null` — the alias, not the real name.
 
 ### Built on `@internal` Kysely APIs — read this before upgrading Kysely
 
-`WhereNode`, `TableNode`, `AliasNode`, and the whole `OperationNodeTransformer`
-dispatch table are marked `@internal` in Kysely's own source. There is no
-publicly documented plugin API for AST rewriting — Kysely's official
-"Extending Kysely" docs cover simpler `Expression`/`sql`-tag based
-extensions, not this. This plugin uses the same mechanism Kysely's own
-bundled plugins (`CamelCasePlugin`, `DeduplicateJoinsPlugin`) use internally,
-which lowers the practical risk — Kysely breaking these nodes would break its
-own plugins too — but it is **not a contract Kysely has committed to for
-third-party code**. If a Kysely upgrade changes behavior here, check this
-file's imports against the new version's `src/operation-node/*` first.
+`WhereNode`, `TableNode`, `AliasNode`, `IdentifierNode`, and the whole
+`OperationNodeTransformer` dispatch table are marked `@internal` in
+Kysely's own source. There is no publicly documented plugin API for AST
+rewriting — Kysely's official "Extending Kysely" docs cover simpler
+`Expression`/`sql`-tag based extensions, not this. This plugin uses the
+same mechanism Kysely's own bundled plugins (`CamelCasePlugin`,
+`DeduplicateJoinsPlugin`) use internally, which lowers the practical risk —
+Kysely breaking these nodes would break its own plugins too — but it is
+**not a contract Kysely has committed to for third-party code**. The audit
+plugin (`plugins/audit.ts`) depends on the same shared node-resolution
+logic via `plugins/table-name.ts`, so a Kysely upgrade that breaks this
+breaks both. If a Kysely upgrade changes behavior here, check this file's
+(and `table-name.ts`'s) imports against the new version's
+`src/operation-node/*` first.
 
 ## What it does *not* do
 
 Be precise about these — silent gaps in a filter meant to prevent seeing
 deleted data are exactly the kind of thing that bites in production.
 
-- **Only `SELECT` is scoped.** `transformSelectQuery` is the only override.
-  An `UPDATE` or a raw `.deleteFrom()` targeting an already-soft-deleted row
-  is **not** blocked by this plugin — nothing stops
-  `db.updateTable("orders").set(...).where("id", "=", deletedOrderId)` from
-  succeeding today. If you need that guarantee, add your own `WHERE
-  deleted_at IS NULL` to update statements for now; scoping writes the same
-  way reads are scoped is not yet built.
-- **`.deleteFrom()` is not intercepted at all** — see
-  [below](#why-deletefrom-is-not-intercepted).
+- **`SELECT` and `UPDATE` are scoped; `.deleteFrom()` is not, and can't
+  be.** An `UPDATE` against an already-soft-deleted row now affects 0 rows
+  by default (the same `deleted_at IS NULL` filter SELECTs get), unless the
+  query goes through `withDeleted()`. A raw `.deleteFrom()` is a different
+  case entirely — see [below](#why-deletefrom-is-not-intercepted) for why
+  that one genuinely can't be scoped by a plugin, not just "isn't yet."
 - **Raw `sql` template literals bypass the plugin entirely.** Anything built
   with the `sql` tag is opaque to `OperationNodeTransformer` — there's no AST
   for it to rewrite. If you drop to raw SQL against a soft-delete table,
@@ -99,12 +113,13 @@ withDeleted(db).selectFrom("orders").selectAll().execute();
 ```
 
 `withDeleted(db)` is `db.withoutPlugins()` — a thin, one-line wrapper. It
-turns off *every* plugin on the instance, not just soft delete. Today that
-distinction is moot (soft delete is the only plugin `@isthmica/core`
-installs), but it stops being moot once audit/CDC ships (see
-[`roadmap.md`](./roadmap.md)) — at that point, reach for a more targeted
-mechanism if you only want to bypass soft-delete filtering and not also
-silence auditing. None exists yet.
+turns off *every* plugin on the instance, not just soft delete. That
+distinction is no longer hypothetical now that the [audit plugin](./audit.md)
+exists: if a table has both `softDelete: true` and `audit: true`,
+`withDeleted(db)` silences audit capture too, not just the soft-delete
+filter — there's no more targeted "bypass only this one plugin" mechanism
+today. Keep that in mind before reaching for `withDeleted()` on a table
+that's also audited.
 
 ## API summary
 

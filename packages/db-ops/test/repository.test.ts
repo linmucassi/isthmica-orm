@@ -14,6 +14,11 @@ const orders = table(
   "orders",
   {
     id: serial("id").primaryKey(),
+    // Object key ("tenantId") deliberately differs from the declared
+    // column name ("tenant_id") — exercises repository.ts's
+    // toRawRecord/fromRawRow translation, not just the matching-name case
+    // every other field here happens to be in.
+    tenantId: text("tenant_id").notNull(),
     status: text("status").notNull(),
     createdAt: timestamp("createdAt").defaultNow(),
   },
@@ -36,6 +41,7 @@ async function createSchema(db: Kysely<DB>): Promise<void> {
   await db.schema
     .createTable("orders")
     .addColumn("id", "integer", (c) => c.primaryKey().autoIncrement())
+    .addColumn("tenant_id", "text", (c) => c.notNull())
     .addColumn("status", "text", (c) => c.notNull())
     .addColumn("createdAt", "text")
     // deleted_at isn't part of the `orders` table() definition above — the
@@ -80,7 +86,7 @@ describe("createRepository", () => {
     const scopedDb = withSoftDelete(db, tables);
     const repo = createRepository(scopedDb, orders);
 
-    const inserted = await repo.insert({ status: "open" });
+    const inserted = await repo.insert({ tenantId: "t_1", status: "open" });
     await repo.delete(inserted.id);
 
     // the soft-delete-scoped repository no longer sees it...
@@ -95,5 +101,25 @@ describe("createRepository", () => {
 
   it("throws at creation time if the configured primary key column doesn't exist", () => {
     expect(() => createRepository(db, tags, { primaryKey: "nope" as never })).toThrow(/primary key/i);
+  });
+
+  it("translates between the object key (tenantId) and the declared column name (tenant_id) at every boundary", async () => {
+    const repo = createRepository(db, orders);
+
+    const inserted = await repo.insert({ tenantId: "t_42", status: "open" });
+    // The public shape is object-key ("tenantId"), even though the actual
+    // column and the SQL that produced this row both use "tenant_id".
+    expect(inserted.tenantId).toBe("t_42");
+    expect((inserted as Record<string, unknown>)["tenant_id"]).toBeUndefined();
+
+    const fetched = await repo.get(inserted.id);
+    expect(fetched?.tenantId).toBe("t_42");
+
+    const updated = await repo.update(inserted.id, { tenantId: "t_43" });
+    expect(updated?.tenantId).toBe("t_43");
+
+    // and the real column really is "tenant_id" — confirmed via a raw query
+    const raw = await sql<{ tenant_id: string }>`select tenant_id from orders where id = ${inserted.id}`.execute(db);
+    expect(raw.rows[0]?.tenant_id).toBe("t_43");
   });
 });

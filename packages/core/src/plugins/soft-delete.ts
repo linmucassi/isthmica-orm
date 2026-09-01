@@ -1,7 +1,5 @@
 import {
-  AliasNode,
   OperationNodeTransformer,
-  TableNode,
   WhereNode,
   expressionBuilder,
   type KyselyPlugin,
@@ -12,28 +10,36 @@ import {
   type RootOperationNode,
   type SelectQueryNode,
   type UnknownRow,
+  type UpdateQueryNode,
 } from "kysely";
+import { extractTableRef, refsFromFromAndJoins, type TableRef } from "./table-name.js";
 
 /**
- * Rewrites SELECT queries against configured tables to add
+ * Rewrites SELECT and UPDATE queries against configured tables to add
  * `WHERE <deletedAtColumn> IS NULL`, ANDed onto any existing WHERE clause.
  *
  * Built on Kysely's `OperationNodeTransformer` and its operation-node
- * factories (`WhereNode`, `TableNode`, `AliasNode`). Those are marked
- * `@internal` in Kysely's source — there's no publicly documented plugin
- * API for AST rewriting. This is the same mechanism Kysely's own bundled
- * plugins (CamelCasePlugin, DeduplicateJoinsPlugin) use internally, so a
- * breaking change here would break those too, which lowers the practical
- * risk — but it's not a stable contract Kysely has committed to for
- * third-party plugin authors. Revisit this note if a Kysely upgrade breaks it.
+ * factories (`WhereNode`, `TableNode`, `AliasNode`, `IdentifierNode`).
+ * Those are marked `@internal` in Kysely's source — there's no publicly
+ * documented plugin API for AST rewriting. This is the same mechanism
+ * Kysely's own bundled plugins (CamelCasePlugin, DeduplicateJoinsPlugin)
+ * use internally, so a breaking change here would break those too, which
+ * lowers the practical risk — but it's not a stable contract Kysely has
+ * committed to for third-party plugin authors. Revisit this note if a
+ * Kysely upgrade breaks it.
  *
- * This only covers the read side. It deliberately does NOT intercept
- * `.deleteFrom()` and rewrite it into an UPDATE — Kysely's plugin API
- * cannot change a query's root operation kind (confirmed via
+ * UPDATE is scoped the same way SELECT is: an UPDATE against a row that's
+ * already soft-deleted affects 0 rows by default, unless the query goes
+ * through `withDeleted()`. This is a deliberate behavior change from an
+ * earlier version of this plugin, which only scoped SELECT.
+ *
+ * This still deliberately does NOT intercept `.deleteFrom()` and rewrite
+ * it into an UPDATE — Kysely's plugin API cannot change a query's root
+ * operation kind (confirmed via
  * https://github.com/kysely-org/kysely/issues/803, where the only working
  * approach required replacing the QueryExecutor, not the plugin API).
  * The write side of soft delete is a separate, explicit API
- * (`softDelete()` in db.ts) that issues a real UPDATE.
+ * (`softDeleteUpdate()` in db.ts) that issues a real UPDATE.
  */
 export function createSoftDeletePlugin(options: {
   readonly tables: readonly string[];
@@ -69,21 +75,33 @@ class SoftDeleteTransformer extends OperationNodeTransformer {
     queryId?: Parameters<OperationNodeTransformer["transformSelectQuery"]>[1],
   ): SelectQueryNode {
     const transformed = super.transformSelectQuery(node, queryId);
-    return this.applyFilter(transformed);
+    return this.applyFilter(transformed, refsFromFromAndJoins(transformed));
   }
 
-  private applyFilter(node: SelectQueryNode): SelectQueryNode {
-    const tableNames = this.tableNamesIn(node);
-    const targets = tableNames.filter((name) => this.softDeleteTables.has(name));
+  protected override transformUpdateQuery(
+    node: UpdateQueryNode,
+    queryId?: Parameters<OperationNodeTransformer["transformUpdateQuery"]>[1],
+  ): UpdateQueryNode {
+    const transformed = super.transformUpdateQuery(node, queryId);
+    const refs = [
+      ...(transformed.table ? [transformed.table] : []),
+      ...refsFromFromAndJoins(transformed),
+    ];
+    return this.applyFilter(transformed, refs);
+  }
+
+  private applyFilter<T extends { readonly where?: WhereNode }>(
+    node: T,
+    refNodes: readonly OperationNode[],
+  ): T {
+    const targets = this.resolveTargets(refNodes);
     if (targets.length === 0) {
       return node;
     }
 
-    // Untyped on purpose: this plugin operates on the raw AST across
-    // whatever tables are configured, independent of any single `DB` shape.
     const eb = expressionBuilder<any, any>();
-    const checks = targets.map((tableName) =>
-      eb(eb.ref(`${tableName}.${this.deletedAtColumn}`), "is", null),
+    const checks = targets.map((target) =>
+      eb(eb.ref(`${target.refName}.${this.deletedAtColumn}`), "is", null),
     );
     const filterNode = (checks.length === 1 ? checks[0]! : eb.and(checks)).toOperationNode();
 
@@ -94,28 +112,19 @@ class SoftDeleteTransformer extends OperationNodeTransformer {
     return { ...node, where };
   }
 
-  private tableNamesIn(node: SelectQueryNode): string[] {
-    const names = new Set<string>();
+  private resolveTargets(refNodes: readonly OperationNode[]): TableRef[] {
+    const seenRefNames = new Set<string>();
+    const targets: TableRef[] = [];
 
-    for (const from of node.from?.froms ?? []) {
-      const name = this.extractTableName(from);
-      if (name) names.add(name);
-    }
-    for (const join of node.joins ?? []) {
-      const name = this.extractTableName(join.table);
-      if (name) names.add(name);
+    for (const node of refNodes) {
+      const ref = extractTableRef(node);
+      if (!ref || !this.softDeleteTables.has(ref.realName) || seenRefNames.has(ref.refName)) {
+        continue;
+      }
+      seenRefNames.add(ref.refName);
+      targets.push(ref);
     }
 
-    return [...names];
-  }
-
-  private extractTableName(node: OperationNode): string | undefined {
-    if (TableNode.is(node)) {
-      return node.table.identifier.name;
-    }
-    if (AliasNode.is(node) && TableNode.is(node.node)) {
-      return node.node.table.identifier.name;
-    }
-    return undefined;
+    return targets;
   }
 }

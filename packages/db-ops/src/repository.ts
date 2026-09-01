@@ -8,14 +8,13 @@ import {
   type TableDefinition,
 } from "@isthmica/core";
 
-type AnyColumns = Record<string, ColumnBuilder<any, any>>;
+type AnyColumns = Record<string, ColumnBuilder<any, any, any>>;
 
 export interface RepositoryOptions<TColumns extends AnyColumns, TPrimaryKey extends keyof TColumns> {
   /**
    * Which column identifies a row, by its object key in the `table()`
-   * definition — not the string passed to `text()`/`serial()`/etc. (see
-   * the naming note in docs/schema-dsl.md: the object key is what Kysely
-   * queries actually reference today). Defaults to `"id"` if the table has
+   * definition (not the string passed to `text()`/`serial()`/etc. — see
+   * docs/schema-dsl.md's naming note). Defaults to `"id"` if the table has
    * a column at that key. Isthmica doesn't track "is this the primary key"
    * at the type level (only as runtime metadata on `ColumnBuilder`), so
    * beyond that convention it can't be auto-detected — pass this explicitly
@@ -57,6 +56,15 @@ export interface Repository<
  * to — same pragmatic escape hatch `softDeleteUpdate` in `@isthmica/core`
  * uses internally. The public `Repository<...>` return type stays fully
  * typed; only this function's internal plumbing is loose.
+ *
+ * Since `@isthmica/core`'s `InferSelect`/`InferInsert`/`InferUpdate` are
+ * keyed by object key (e.g. `tenantId`) while Kysely's actual compiled
+ * queries reference each column's declared name (e.g. `tenant_id`) — see
+ * the naming note in docs/schema-dsl.md — this function translates between
+ * the two at its boundary: `toRawRecord` before every write, `fromRawRow`
+ * after every read. Nothing outside this file needs to know that
+ * translation happens; `Repository`'s public shape is entirely object-key
+ * (JS-facing), matching `$inferSelect`/`$inferInsert` everywhere else.
  */
 export function createRepository<
   DB,
@@ -69,12 +77,14 @@ export function createRepository<
   options: RepositoryOptions<TColumns, TPrimaryKey> = {},
 ): Repository<DB, TName, TColumns, TPrimaryKey> {
   const primaryKey = options.primaryKey ?? ("id" as TPrimaryKey);
-  const primaryKeyName = String(primaryKey);
-  if (!(primaryKeyName in table.columns)) {
+  const primaryKeyObjectKey = String(primaryKey);
+  const primaryKeyColumn = table.columns[primaryKeyObjectKey] as ColumnBuilder<any, any, any> | undefined;
+  if (!primaryKeyColumn) {
     throw new Error(
-      `createRepository("${table.name}"): primary key column "${primaryKeyName}" is not defined on this table. Pass { primaryKey: "<column>" } explicitly if it isn't "id".`,
+      `createRepository("${table.name}"): primary key column "${primaryKeyObjectKey}" is not defined on this table. Pass { primaryKey: "<column>" } explicitly if it isn't "id".`,
     );
   }
+  const primaryKeyRawName = primaryKeyColumn.name;
 
   const tableName = table.name;
   const anyDb = db as unknown as {
@@ -86,18 +96,20 @@ export function createRepository<
 
   return {
     async get(id) {
-      return anyDb
+      const row = await anyDb
         .selectFrom(tableName)
         .selectAll()
-        .where(primaryKeyName, "=", id)
+        .where(primaryKeyRawName, "=", id)
         .executeTakeFirst();
+      return fromRawRow(table, row);
     },
     async insert(values) {
-      return anyDb
+      const row = await anyDb
         .insertInto(tableName)
-        .values(values)
+        .values(toRawRecord(table, values as Record<string, unknown>))
         .returningAll()
         .executeTakeFirstOrThrow();
+      return fromRawRow(table, row);
     },
     async update(id, values) {
       // An empty `values` compiles to `SET` with nothing after it — a raw
@@ -108,19 +120,47 @@ export function createRepository<
       if (Object.keys(values as object).length === 0) {
         return this.get(id);
       }
-      return anyDb
+      const row = await anyDb
         .updateTable(tableName)
-        .set(values)
-        .where(primaryKeyName, "=", id)
+        .set(toRawRecord(table, values as Record<string, unknown>))
+        .where(primaryKeyRawName, "=", id)
         .returningAll()
         .executeTakeFirst();
+      return fromRawRow(table, row);
     },
     async delete(id) {
       if (table.options.softDelete) {
-        await (softDeleteUpdate(db, tableName) as any).where(primaryKeyName, "=", id).execute();
+        await (softDeleteUpdate(db, tableName) as any).where(primaryKeyRawName, "=", id).execute();
         return;
       }
-      await anyDb.deleteFrom(tableName).where(primaryKeyName, "=", id).execute();
+      await anyDb.deleteFrom(tableName).where(primaryKeyRawName, "=", id).execute();
     },
   };
+}
+
+/** Object-key-shaped values (e.g. `{ tenantId: "x" }`) -> declared-name-shaped (`{ tenant_id: "x" }`). */
+function toRawRecord(
+  table: TableDefinition<any, any>,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const raw: Record<string, unknown> = {};
+  for (const [objectKey, value] of Object.entries(values)) {
+    const column = table.columns[objectKey] as ColumnBuilder<any, any, any> | undefined;
+    raw[column?.name ?? objectKey] = value;
+  }
+  return raw;
+}
+
+/** A raw Kysely row (declared-name-shaped) -> object-key-shaped, matching `InferSelect`. */
+function fromRawRow(table: TableDefinition<any, any>, row: Record<string, unknown> | undefined): any {
+  if (!row) {
+    return undefined;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [objectKey, column] of Object.entries(table.columns) as [string, ColumnBuilder<any, any, any>][]) {
+    if (column.name in row) {
+      result[objectKey] = row[column.name];
+    }
+  }
+  return result;
 }

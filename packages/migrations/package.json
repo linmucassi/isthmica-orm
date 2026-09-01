@@ -1,8 +1,8 @@
 {
-  "name": "@isthmica/core",
+  "name": "@isthmica/migrations",
   "version": "0.0.1",
   "license": "Apache-2.0",
-  "description": "Typed, declarative primitives for soft delete, audit, and tenant isolation on top of Kysely.",
+  "description": "Schema DDL generation, diffing, and a first migrations slice for @isthmica/core table definitions. Optional — @isthmica/core works standalone without this package.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -22,13 +22,17 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@isthmica/core": "^0.0.1"
+  },
   "peerDependencies": {
     "kysely": "^0.29.0"
   },
   "devDependencies": {
-    "@types/pg": "^8.11.10",
+    "@isthmica/core": "^0.0.1",
+    "@types/better-sqlite3": "^7.6.11",
+    "better-sqlite3": "^11.5.0",
     "kysely": "^0.29.5",
-    "pg": "^8.13.1",
     "tsup": "^8.3.5",
     "typescript": "^5.6.3",
     "vitest": "^4.1.11"
