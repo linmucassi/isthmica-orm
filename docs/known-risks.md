@@ -98,6 +98,58 @@ real, current gap, not a hypothetical one. If your application logic depends
 on "you can't update a soft-deleted row," you need to add that check
 yourself for now.
 
+## Discovered while building db-ops
+
+Building `@isthmica/db-ops`'s repository layer (`get`/`insert`/`update`/`delete`
+— see [`db-ops.md`](./db-ops.md)) exercised `@isthmica/core`'s schema DSL in
+ways the DSL's own tests hadn't: writing real insert/update calls with
+partial data, and running the soft-delete write path against a second SQL
+dialect. Both surfaced real, previously-undiscovered issues in already-shipped
+`@isthmica/core` code — fixed as part of this work, not left for later:
+
+### `InferInsert`/`InferSelect` didn't mark DB-generated columns optional
+
+The original `InferSelect`/`InferInsert` in `table.ts` mapped every column
+straight through (`{ [K in keyof TColumns]: TColumns[K]["$insertType"] }`).
+That looks right but isn't: a column typed `number | undefined` this way is
+still a **required key** whose value may be `undefined` — not an
+**optional key** you can omit. So `repo.insert({ label: "x" })` for a table
+with an auto-generated `serial().primaryKey()` `id` failed to typecheck,
+silently defeating the entire point of `.primaryKey()`/`.defaultNow()`
+making a field optional on insert. Fixed by rebuilding `InferSelect`/
+`InferInsert`/`InferUpdate` on top of Kysely's own `Selectable<T>`/
+`Insertable<T>`/`Updateable<T>` utilities (which already do the
+required/optional split correctly — that's exactly what they're for)
+instead of a hand-rolled mapped type. See
+[`schema-dsl.md`](./schema-dsl.md#inferdatabase).
+
+### `softDeleteUpdate` used a JS `Date`, which isn't portable
+
+`softDeleteUpdate` set `deleted_at` to a plain `new Date()`. That happens to
+work against Postgres because the `pg` driver serializes JS `Date` objects,
+but it isn't SQL — SQLite's driver (`better-sqlite3`, used in `db-ops`'s own
+repository tests) throws on a bound `Date`, accepting only numbers, strings,
+bigints, buffers, and `null`. Fixed by switching to
+`sql`current_timestamp`` — standard SQL, valid on every dialect, and a
+better default anyway (DB-server clock instead of app-server clock, so
+skew between app instances can't produce inconsistent timestamps). See
+[`soft-delete.md`](./soft-delete.md#api-summary).
+
+### Column object key vs. declared column name — a real gap, not yet fixed
+
+Distinct from the two fixes above: the string passed to
+`text()`/`serial()`/`timestamp()` (e.g. `text("tenant_id")`) is not
+currently wired to query generation at all — Kysely's typed queries
+reference the **object key** you used in the `columns` record, not that
+string. This is fully documented (with both workarounds) in
+[`schema-dsl.md`](./schema-dsl.md#a-naming-detail-object-key-vs-declared-column-name)
+rather than fixed here — making the `name` argument load-bearing would mean
+giving `ColumnBuilder` a third, name-carrying type parameter so
+`InferRawTable` could remap keys at the type level, which is a real (if
+mechanical) type-signature change to `column.ts` and `table.ts` that
+deserves its own pass rather than being folded into an unrelated db-ops
+session. Tracked here as still-open, not silently left undocumented.
+
 ## Mitigated, but not eliminated
 
 ### Coupling to Kysely's `@internal`-marked AST API

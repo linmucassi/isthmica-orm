@@ -41,13 +41,25 @@ isthmica/
 ├── package.json          # workspace root — npm workspaces config
 ├── tsconfig.base.json     # shared compiler options, extended by every package
 └── packages/
-    └── core/              # @isthmica/core — schema DSL + soft delete (implemented)
+    ├── core/              # @isthmica/core — schema DSL + soft delete (implemented)
+    │   ├── src/
+    │   ├── test/
+    │   ├── package.json
+    │   ├── tsconfig.json
+    │   └── tsup.config.ts
+    └── db-ops/            # @isthmica/db-ops — optional: pg/prisma connect + CRUD (implemented)
         ├── src/
         ├── test/
         ├── package.json
         ├── tsconfig.json
         └── tsup.config.ts
 ```
+
+`@isthmica/db-ops` depends on `@isthmica/core` (resolved via npm workspaces
+to the local package, not the registry) but is entirely optional — nothing
+in `@isthmica/core` depends on it, and using `@isthmica/core` on its own
+works exactly as documented whether or not `db-ops` is installed. See
+[`db-ops.md`](./db-ops.md).
 
 Future packages (a CLI, dialect adapters beyond Postgres, etc.) will land as
 additional `packages/*` entries as they're built — see

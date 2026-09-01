@@ -17,6 +17,18 @@ reflects what's actually in `packages/core/src` today, not intent.
 | **3** | Partitioning. Read-replica routing stays a research spike, not a roadmap line — see [`known-risks.md`](./known-risks.md). | ⬜ Not started. |
 | **4** | Second dialect (MySQL), ecosystem tooling (Studio-equivalent GUI). | ⬜ Not started. |
 
+## `@isthmica/db-ops` — outside the phase numbering, on purpose
+
+`@isthmica/db-ops` (connection helpers for `pg`/`prisma`, plus a
+`createRepository` CRUD layer — see [`db-ops.md`](./db-ops.md)) shipped
+alongside Phase 0 but isn't one of its line items above. It's not part of
+the original wedge (soft delete / audit / tenant isolation / migrations /
+partitioning) — it's a convenience layer addressing the boilerplate of
+wiring `@isthmica/core` up in the first place, requested and built
+separately. ✅ Implemented, `pg` backend tested end-to-end; `prisma` backend
+implemented but not integration-tested (see
+[`known-risks.md`](./known-risks.md)).
+
 ## What "done" means at each phase
 
 A feature moves from ⬜/🟡 to fully shipped when: it has an implementation

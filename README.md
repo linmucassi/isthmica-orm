@@ -66,6 +66,30 @@ await withDeleted(db).selectFrom("orders").selectAll().execute();
 Walk through this end to end, including what each piece does and doesn't
 cover, in [`docs/getting-started.md`](./docs/getting-started.md).
 
+### Optional: less connection boilerplate with `@isthmica/db-ops`
+
+The `Kysely`/`PostgresDialect`/`Pool` setup above is real, working code, but
+it's the part that gets copy-pasted at every place a project builds a `db`
+instance. `@isthmica/db-ops` is a separate, optional package that collapses
+it into one call — `@isthmica/core` is completely unaffected either way:
+
+```ts
+import { pg, createRepository } from "@isthmica/db-ops";
+
+const db = pg.connect<DB>({ connectionString: process.env.DATABASE_URL });
+// same db instance you'd get from the manual setup above — withSoftDelete,
+// withDeleted, softDeleteUpdate, hand-written queries, all work on it as-is
+
+const orderRepo = createRepository(db, orders);
+const order = await orderRepo.insert({ tenantId: "t_1", status: "open" });
+await orderRepo.delete(order.id); // soft-deletes automatically — see docs/db-ops.md
+```
+
+`db-ops` also wires up Prisma-managed connections (`prisma.connect(...)`)
+for projects that already configure credentials through Prisma. Full
+reference, including the two backends and the CRUD layer's limits, in
+[`docs/db-ops.md`](./docs/db-ops.md).
+
 ## Install
 
 This is an npm-workspaces monorepo, not yet a published package (`isthmica`,
@@ -92,6 +116,7 @@ Full requirements and layout: [`docs/installation.md`](./docs/installation.md).
 | [`docs/getting-started.md`](./docs/getting-started.md) | Define a schema, wire it to Kysely, run your first soft-deleted query |
 | [`docs/schema-dsl.md`](./docs/schema-dsl.md) | `column()` builders, `table()`, `InferDatabase` — full API reference |
 | [`docs/soft-delete.md`](./docs/soft-delete.md) | How the soft-delete plugin actually works, including the write-side caveat |
+| [`docs/db-ops.md`](./docs/db-ops.md) | `@isthmica/db-ops` — optional connection setup (`pg`, `prisma`) and CRUD ergonomics (`createRepository`) |
 | [`docs/architecture.md`](./docs/architecture.md) | Why it's built on Kysely, "no external engine process," and what that does and doesn't mean |
 | [`docs/best-practices.md`](./docs/best-practices.md) | Practical guidance for the parts that exist today |
 | [`docs/roadmap.md`](./docs/roadmap.md) | Phased plan, and what's actually shipped vs. still ahead |
@@ -103,6 +128,11 @@ Full requirements and layout: [`docs/installation.md`](./docs/installation.md).
   `table()`, `InferDatabase`) and soft delete (auto `deleted_at IS NULL`
   scoping on reads, an explicit `softDeleteUpdate()` for writes, a
   `withDeleted()` escape hatch).
+- `@isthmica/db-ops` — **optional**, depends on `@isthmica/core` but nothing
+  in `@isthmica/core` depends on it. Connection setup for `pg` (tested
+  end-to-end) and Prisma (implemented, not integration-tested — see
+  [`docs/known-risks.md`](./docs/known-risks.md)), plus a
+  `createRepository()` CRUD layer (get/insert/update/delete).
 
 That's the complete list. Audit/CDC, tenant isolation, migrations, and
 partitioning are designed but not yet built — see
