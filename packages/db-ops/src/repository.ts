@@ -100,6 +100,14 @@ export function createRepository<
         .executeTakeFirstOrThrow();
     },
     async update(id, values) {
+      // An empty `values` compiles to `SET` with nothing after it — a raw
+      // SQL syntax error at the driver, not a validation error, and easy to
+      // hit by accident from code that conditionally builds a partial
+      // update object. Treat it as a true no-op instead: return the row
+      // unchanged rather than letting the driver reject malformed SQL.
+      if (Object.keys(values as object).length === 0) {
+        return this.get(id);
+      }
       return anyDb
         .updateTable(tableName)
         .set(values)
